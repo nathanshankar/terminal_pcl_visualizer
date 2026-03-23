@@ -9,6 +9,7 @@
 #include <csignal>
 #include <iomanip>
 #include <sstream>
+#include <cmath>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -28,8 +29,7 @@ class TerminalPCLNode : public rclcpp::Node {
 public:
     TerminalPCLNode() : Node("terminal_pcl_visualizer") {
         this->declare_parameter("topic", "/points");
-        this->declare_parameter("scale", 60.0);
-        this->declare_parameter("max_points", 500);
+        this->declare_parameter("max_points", 2000);
 
         std::string topic = this->get_parameter("topic").as_string();
         sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -44,9 +44,7 @@ public:
     struct Data {
         std::vector<Point> points;
         std::string frame_id;
-        size_t count = 0;
-        float center_x = 0, center_y = 0, center_z = 0;
-        float min_x = 0, max_x = 0, min_z = 0, max_z = 0;
+        float cx = 0, cy = 0, cz = 0;
     };
 
     std::shared_ptr<Data> get_data() {
@@ -58,7 +56,6 @@ private:
     void callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         auto next = std::make_shared<Data>();
         next->frame_id = msg->header.frame_id;
-        next->count = ++received_count_;
 
         size_t max_p = static_cast<size_t>(this->get_parameter("max_points").as_int());
         size_t total_p = static_cast<size_t>(msg->width) * msg->height;
@@ -69,29 +66,22 @@ private:
             sensor_msgs::PointCloud2ConstIterator<float> it_z(*msg, "z");
 
             size_t step = std::max<size_t>(1, total_p / max_p);
-            double sum_x = 0, sum_y = 0, sum_z = 0;
+            double sx = 0, sy = 0, sz = 0;
 
             for (size_t i = 0; i < total_p; i += step) {
                 if (!(it_x != it_x.end())) break;
                 float x = *it_x, y = *it_y, z = *it_z;
                 if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
                     next->points.push_back({x, y, z});
-                    sum_x += x; sum_y += y; sum_z += z;
-                    if (next->points.size() == 1) {
-                        next->min_x = next->max_x = x;
-                        next->min_z = next->max_z = z;
-                    } else {
-                        next->min_x = std::min(next->min_x, x); next->max_x = std::max(next->max_x, x);
-                        next->min_z = std::min(next->min_z, z); next->max_z = std::max(next->max_z, z);
-                    }
+                    sx += x; sy += y; sz += z;
                 }
                 for (size_t s = 0; s < step && it_x != it_x.end(); ++s) { ++it_x; ++it_y; ++it_z; }
                 if (next->points.size() >= max_p) break;
             }
             if (!next->points.empty()) {
-                next->center_x = static_cast<float>(sum_x / next->points.size());
-                next->center_y = static_cast<float>(sum_y / next->points.size());
-                next->center_z = static_cast<float>(sum_z / next->points.size());
+                next->cx = sx / next->points.size();
+                next->cy = sy / next->points.size();
+                next->cz = sz / next->points.size();
             }
         } catch (...) {}
 
@@ -104,7 +94,6 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
     std::mutex mtx_;
     std::shared_ptr<Data> data_;
-    size_t received_count_ = 0;
 };
 
 std::atomic<bool> g_quit_flag{false};
@@ -117,65 +106,96 @@ int main(int argc, char** argv) {
 
     auto node = std::make_shared<TerminalPCLNode>();
     auto screen = ScreenInteractive::TerminalOutput();
-    screen.TrackMouse(false);
+
+    // CALIBRATED DEFAULT VIEW (Based on user feedback)
+    // Front view required 15 presses of A (-1.5 yaw) and 15 presses of E (+1.5 roll)
+    const float DEF_YAW = -1.5f;
+    const float DEF_PITCH = 0.0f;
+    const float DEF_ROLL = 1.5f;
+    const float DEF_DIST = 5.0f;
+
+    std::atomic<float> yaw{DEF_YAW};
+    std::atomic<float> pitch{DEF_PITCH};
+    std::atomic<float> roll{DEF_ROLL};
+    std::atomic<float> dist{DEF_DIST};
+    std::atomic<float> zoom{250.0f};
+    std::atomic<bool> cam_mode{true};
 
     std::thread ros_thread([&]() { rclcpp::spin(node); });
-    std::atomic<float> manual_scale{0.0f};
 
     auto renderer = Renderer([&]() {
         auto data = node->get_data();
-        float base_scale = node->get_parameter("scale").as_double();
-        float cur_manual = manual_scale.load();
-        float scale = (cur_manual == 0.0f) ? base_scale : cur_manual;
-
-        auto c = Canvas(200, 120);
+        auto canvas_obj = Canvas(200, 120);
         int cx = 100, cy = 60;
 
-        // Draw white crosshair
-        for(int i=-10; i<=10; ++i) c.DrawPoint(cx + i, cy, true, Color::White);
-        for(int i=-6; i<=6; ++i) c.DrawPoint(cx, cy + i, true, Color::White);
+        float cyaw = yaw.load();
+        float cpitch = pitch.load();
+        float croll = roll.load();
+        float cdist = dist.load();
+        float czoom = zoom.load();
+        bool cm = cam_mode.load();
 
         if (!data->points.empty()) {
             for (const auto& p : data->points) {
-                int sx, sy;
-                if (data->frame_id.find("camera") != std::string::npos) {
-                    sx = cx + static_cast<int>((p.x - data->center_x) * scale);
-                    sy = cy - static_cast<int>((p.z - data->center_z) * scale);
+                float dx = p.x - data->cx;
+                float dy = p.y - data->cy;
+                float dz = p.z - data->cz;
+
+                float rx, ry, rz;
+                if (cm) {
+                    rx = dx; ry = dy; rz = dz;
                 } else {
-                    sx = cx - static_cast<int>((p.y - data->center_y) * scale);
-                    sy = cy - static_cast<int>((p.x - data->center_x) * scale);
+                    rx = -dy; ry = -dz; rz = dx;
                 }
 
-                if (sx >= 1 && sx < 199 && sy >= 1 && sy < 119) {
-                    // Draw 2x2 block for high visibility
-                    c.DrawPoint(sx, sy, true, Color::Yellow);
-                    c.DrawPoint(sx+1, sy, true, Color::Yellow);
-                    c.DrawPoint(sx, sy+1, true, Color::Yellow);
-                    c.DrawPoint(sx+1, sy+1, true, Color::Yellow);
+                // 1. Yaw
+                float x1 = rx * cos(cyaw) + rz * sin(cyaw);
+                float z1 = -rx * sin(cyaw) + rz * cos(cyaw);
+
+                // 2. Pitch
+                float y2 = ry * cos(cpitch) - z1 * sin(cpitch);
+                float z2 = ry * sin(cpitch) + z1 * cos(cpitch);
+
+                // 3. Roll
+                float x3 = x1 * cos(croll) - y2 * sin(croll);
+                float y3 = x1 * sin(croll) + y2 * cos(croll);
+
+                float final_z = z2 + cdist;
+                if (final_z > 0.1f) {
+                    int sx = cx + static_cast<int>(czoom * x3 / final_z);
+                    int sy = cy + static_cast<int>(czoom * y3 / final_z);
+                    if (sx >= 0 && sx < 200 && sy >= 0 && sy < 120) {
+                        canvas_obj.DrawPoint(sx, sy, true, Color::Yellow);
+                    }
                 }
             }
         }
 
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(2) << " Range X: " << (data->max_x - data->min_x) << "m, Z: " << (data->max_z - data->min_z) << "m";
+        for(int i=-4; i<=4; ++i) {
+            canvas_obj.DrawPoint(cx + i, cy, true, Color::White);
+            canvas_obj.DrawPoint(cx, cy + i, true, Color::White);
+        }
 
-        return window(text(" PCL Visualizer (Bird's Eye View) ") | hcenter | bold,
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(1) << "Y:" << cyaw << " P:" << cpitch << " R:" << croll;
+
+        return window(text(" 3D PointCloud Visualizer ") | hcenter | bold,
             vbox({
                 hbox({
                     text(" Frame: " + data->frame_id) | color(Color::Cyan),
                     filler(),
                     text(ss.str()) | color(Color::GrayLight),
                     filler(),
-                    text(" Pts: " + std::to_string(data->points.size())) | color(Color::Green),
+                    text(cm ? "[CAMERA]" : "[ROBOT]") | bold | color(Color::Magenta),
                     filler(),
-                    text(" Scale: " + std::to_string((int)scale)) | color(Color::Yellow)
+                    text(" Pts: " + std::to_string(data->points.size())) | color(Color::Green)
                 }),
                 separator(),
-                canvas(std::move(c)) | hcenter | border,
+                canvas(std::move(canvas_obj)) | hcenter | border,
                 hbox({
-                    text(" [+/-] Zoom | [r] Reset | [q] Quit ") | dim,
+                    text(" [WASD] Orbit | [QE] Roll | [1/2/3] Views | [Q] Quit ") | dim,
                     filler(),
-                    text(!rclcpp::ok() ? " ROS SHUTDOWN " : (g_quit_flag ? " EXITING... " : "")) | bold | color(Color::Red)
+                    text(g_quit_flag ? " EXITING... " : "") | bold | color(Color::Red)
                 })
             })
         );
@@ -183,15 +203,22 @@ int main(int argc, char** argv) {
 
     auto component = CatchEvent(renderer, [&](Event event) {
         if (event == Event::Character('q') || event == Event::Escape) { g_quit_flag = true; screen.Exit(); return true; }
-        if (event == Event::Character('+') || event == Event::Character('=')) {
-            float s = (manual_scale.load() == 0.0f) ? node->get_parameter("scale").as_double() : manual_scale.load();
-            manual_scale = s * 1.2f; return true;
-        }
-        if (event == Event::Character('-') || event == Event::Character('_')) {
-            float s = (manual_scale.load() == 0.0f) ? node->get_parameter("scale").as_double() : manual_scale.load();
-            manual_scale = s / 1.2f; return true;
-        }
-        if (event == Event::Character('r')) { manual_scale = 0.0f; return true; }
+        if (event == Event::Character('w')) { pitch = pitch.load() - 0.1f; return true; }
+        if (event == Event::Character('s')) { pitch = pitch.load() + 0.1f; return true; }
+        if (event == Event::Character('a')) { yaw = yaw.load() - 0.1f; return true; }
+        if (event == Event::Character('d')) { yaw = yaw.load() + 0.1f; return true; }
+        if (event == Event::Character('e')) { roll = roll.load() + 0.1f; return true; }
+        if (event == Event::Character('q')) { roll = roll.load() - 0.1f; return true; }
+        if (event == Event::Character('c')) { cam_mode = !cam_mode.load(); return true; }
+        
+        // Calibrated Presets based on your offsets
+        if (event == Event::Character('1')) { yaw = DEF_YAW; pitch = 0.0f; roll = DEF_ROLL; dist = DEF_DIST; return true; } // Front
+        if (event == Event::Character('2')) { yaw = DEF_YAW; pitch = 1.5f; roll = DEF_ROLL; dist = 8.0f; return true; }     // Top
+        if (event == Event::Character('3')) { yaw = DEF_YAW + 1.5f; pitch = 0.0f; roll = DEF_ROLL; dist = 8.0f; return true; } // Side
+        
+        if (event == Event::Character('r')) { yaw = DEF_YAW; pitch = DEF_PITCH; roll = DEF_ROLL; dist = DEF_DIST; return true; }
+        if (event == Event::Character('+') || event == Event::Character('=')) { dist = dist.load() - 0.5f; return true; }
+        if (event == Event::Character('-') || event == Event::Character('_')) { dist = dist.load() + 0.5f; return true; }
         return false;
     });
 
