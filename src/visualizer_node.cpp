@@ -29,7 +29,7 @@ class TerminalPCLNode : public rclcpp::Node {
 public:
     TerminalPCLNode() : Node("terminal_pcl_visualizer") {
         this->declare_parameter("topic", "/points");
-        this->declare_parameter("max_points", 2000);
+        this->declare_parameter("max_points", 2500);
 
         std::string topic = this->get_parameter("topic").as_string();
         sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -45,6 +45,7 @@ public:
         std::vector<Point> points;
         std::string frame_id;
         float cx = 0, cy = 0, cz = 0;
+        float min_x = 0, max_x = 0;
     };
 
     std::shared_ptr<Data> get_data() {
@@ -74,6 +75,13 @@ private:
                 if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
                     next->points.push_back({x, y, z});
                     sx += x; sy += y; sz += z;
+                    
+                    if (next->points.size() == 1) {
+                        next->min_x = next->max_x = x;
+                    } else {
+                        next->min_x = std::min(next->min_x, x);
+                        next->max_x = std::max(next->max_x, x);
+                    }
                 }
                 for (size_t s = 0; s < step && it_x != it_x.end(); ++s) { ++it_x; ++it_y; ++it_z; }
                 if (next->points.size() >= max_p) break;
@@ -107,8 +115,6 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<TerminalPCLNode>();
     auto screen = ScreenInteractive::TerminalOutput();
 
-    // CALIBRATED DEFAULT VIEW (Based on user feedback)
-    // Front view required 15 presses of A (-1.5 yaw) and 15 presses of E (+1.5 roll)
     const float DEF_YAW = -1.5f;
     const float DEF_PITCH = 0.0f;
     const float DEF_ROLL = 1.5f;
@@ -136,6 +142,9 @@ int main(int argc, char** argv) {
         bool cm = cam_mode.load();
 
         if (!data->points.empty()) {
+            float x_range = data->max_x - data->min_x;
+            if (x_range <= 0) x_range = 1.0f;
+
             for (const auto& p : data->points) {
                 float dx = p.x - data->cx;
                 float dy = p.y - data->cy;
@@ -148,15 +157,10 @@ int main(int argc, char** argv) {
                     rx = -dy; ry = -dz; rz = dx;
                 }
 
-                // 1. Yaw
                 float x1 = rx * cos(cyaw) + rz * sin(cyaw);
                 float z1 = -rx * sin(cyaw) + rz * cos(cyaw);
-
-                // 2. Pitch
                 float y2 = ry * cos(cpitch) - z1 * sin(cpitch);
                 float z2 = ry * sin(cpitch) + z1 * cos(cpitch);
-
-                // 3. Roll
                 float x3 = x1 * cos(croll) - y2 * sin(croll);
                 float y3 = x1 * sin(croll) + y2 * cos(croll);
 
@@ -165,7 +169,19 @@ int main(int argc, char** argv) {
                     int sx = cx + static_cast<int>(czoom * x3 / final_z);
                     int sy = cy + static_cast<int>(czoom * y3 / final_z);
                     if (sx >= 0 && sx < 200 && sy >= 0 && sy < 120) {
-                        canvas_obj.DrawPoint(sx, sy, true, Color::Yellow);
+                        // RGB Heatmap based on X-axis: Red (min X) -> Yellow -> Green -> Cyan -> Blue (max X)
+                        float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
+                        uint8_t r = 0, g = 0, b = 0;
+                        if (v < 0.25f) { // Red to Yellow
+                            r = 255; g = static_cast<uint8_t>(v * 4.0f * 255); b = 0;
+                        } else if (v < 0.5f) { // Yellow to Green
+                            r = static_cast<uint8_t>((0.5f - v) * 4.0f * 255); g = 255; b = 0;
+                        } else if (v < 0.75f) { // Green to Cyan
+                            r = 0; g = 255; b = static_cast<uint8_t>((v - 0.5f) * 4.0f * 255);
+                        } else { // Cyan to Blue
+                            r = 0; g = static_cast<uint8_t>((1.0f - v) * 4.0f * 255); b = 255;
+                        }
+                        canvas_obj.DrawPoint(sx, sy, true, Color::RGB(r, g, b));
                     }
                 }
             }
@@ -177,7 +193,7 @@ int main(int argc, char** argv) {
         }
 
         std::stringstream ss;
-        ss << std::fixed << std::setprecision(1) << "Y:" << cyaw << " P:" << cpitch << " R:" << croll;
+        ss << "Y:" << std::fixed << std::setprecision(1) << cyaw << " P:" << cpitch << " R:" << croll;
 
         return window(text(" 3D PointCloud Visualizer ") | hcenter | bold,
             vbox({
@@ -193,7 +209,7 @@ int main(int argc, char** argv) {
                 separator(),
                 canvas(std::move(canvas_obj)) | hcenter | border,
                 hbox({
-                    text(" [WASD] Orbit | [QE] Roll | [1/2/3] Views | [Q] Quit ") | dim,
+                    text(" [WASD] Orbit | [OP] Roll | [1/2/3] Views | [Q] Quit ") | dim,
                     filler(),
                     text(g_quit_flag ? " EXITING... " : "") | bold | color(Color::Red)
                 })
@@ -207,14 +223,13 @@ int main(int argc, char** argv) {
         if (event == Event::Character('s')) { pitch = pitch.load() + 0.1f; return true; }
         if (event == Event::Character('a')) { yaw = yaw.load() - 0.1f; return true; }
         if (event == Event::Character('d')) { yaw = yaw.load() + 0.1f; return true; }
-        if (event == Event::Character('e')) { roll = roll.load() + 0.1f; return true; }
-        if (event == Event::Character('q')) { roll = roll.load() - 0.1f; return true; }
+        if (event == Event::Character('p')) { roll = roll.load() + 0.1f; return true; }
+        if (event == Event::Character('o')) { roll = roll.load() - 0.1f; return true; }
         if (event == Event::Character('c')) { cam_mode = !cam_mode.load(); return true; }
         
-        // Calibrated Presets based on your offsets
-        if (event == Event::Character('1')) { yaw = DEF_YAW; pitch = 0.0f; roll = DEF_ROLL; dist = DEF_DIST; return true; } // Front
-        if (event == Event::Character('2')) { yaw = DEF_YAW; pitch = 1.5f; roll = DEF_ROLL; dist = 8.0f; return true; }     // Top
-        if (event == Event::Character('3')) { yaw = DEF_YAW + 1.5f; pitch = 0.0f; roll = DEF_ROLL; dist = 8.0f; return true; } // Side
+        if (event == Event::Character('1')) { yaw = DEF_YAW; pitch = 0.0f; roll = DEF_ROLL; dist = DEF_DIST; return true; }
+        if (event == Event::Character('2')) { yaw = DEF_YAW; pitch = 1.5f; roll = DEF_ROLL; dist = 8.0f; return true; }
+        if (event == Event::Character('3')) { yaw = DEF_YAW + 1.5f; pitch = 0.0f; roll = DEF_ROLL; dist = 8.0f; return true; }
         
         if (event == Event::Character('r')) { yaw = DEF_YAW; pitch = DEF_PITCH; roll = DEF_ROLL; dist = DEF_DIST; return true; }
         if (event == Event::Character('+') || event == Event::Character('=')) { dist = dist.load() - 0.5f; return true; }
