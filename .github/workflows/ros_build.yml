@@ -1,0 +1,45 @@
+name: ROS 2 Build Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  ros_build:
+    name: Build on ROS 2 ${{ matrix.ros_distro }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        ros_distro: [humble, jazzy]
+        include:
+          - ros_distro: humble
+            os: ubuntu-22.04
+          - ros_distro: jazzy
+            os: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup ROS 2
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: ${{ matrix.ros_distro }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          rosdep update
+          rosdep install --from-paths . --ignore-src -r -y --rosdistro ${{ matrix.ros_distro }}
+
+      - name: Build Package
+        run: |
+          . /opt/ros/${{ matrix.ros_distro }}/setup.sh
+          colcon build --packages-select terminal_pcl_visualizer --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Run Tests
+        run: |
+          . /opt/ros/${{ matrix.ros_distro }}/setup.sh
+          colcon test --packages-select terminal_pcl_visualizer
+          colcon test-result --all
