@@ -2,7 +2,7 @@
 
 A high-performance, real-time 3D Point Cloud visualizer for your terminal. Built with ROS 2 and [FTXUI](https://github.com/ArthurSonzogni/ftxui), it allows you to visualize point clouds and control robots directly from your CLI with near-zero latency.
 
-![3D Visualizer Screenshot Placeholder](https://via.placeholder.com/800x400.png?text=3D+Terminal+PCL+Visualizer+UI)
+![3D Visualizer Screenshot Placeholder](![alt text](image.png))
 
 ## Features
 
