@@ -43,10 +43,9 @@ Element Visualizer::render_frame() {
     auto data = node_->get_data();
     auto terminal = Terminal::Size();
     
-    // FTXUI Canvas uses Braille dots (2x4 per char)
-    // We reserve some height for header (2-3) and footer (1-2) and borders
-    const int target_height = std::max(10, terminal.dimy - 6);
-    const int target_width = std::max(10, terminal.dimx - 2);
+    // Reserve more height for stability (header=1, sep=1, footer=1, borders=4)
+    const int target_height = std::max(10, terminal.dimy - 8);
+    const int target_width = std::max(10, terminal.dimx - 4);
     
     const int sw = target_width * 2;
     const int sh = target_height * 4;
@@ -60,8 +59,14 @@ Element Visualizer::render_frame() {
     cur_roll_ += (tar_roll_.load() - cur_roll_) * 0.2f;
     cur_dist_ += (tar_dist_.load() - cur_dist_) * 0.2f;
 
-    std::vector<float> z_buffer(sw * sh, 1000.0f);
-    float x_range = std::max(0.1f, data->max_x - data->min_x);
+    if (z_buffer_.size() != static_cast<size_t>(sw * sh)) {
+        z_buffer_.assign(sw * sh, 1000.0f);
+    } else {
+        std::fill(z_buffer_.begin(), z_buffer_.end(), 1000.0f);
+    }
+    float* z_ptr = z_buffer_.data();
+
+    float x_range_inv = 1.0f / std::max(0.1f, data->max_x - data->min_x);
     float czoom = zoom_.load();
     bool cm = cam_mode_.load();
 
@@ -78,7 +83,6 @@ Element Visualizer::render_frame() {
 
     auto project = [&](float dx, float dy, float dz, int& out_sx, int& out_sy, float& out_z) {
         float rx, ry, rz;
-        // Apply camera translation offset
         float tx = dx - cx_off;
         float ty = dy - cy_off;
         float tz = dz - cz_off;
@@ -95,28 +99,29 @@ Element Visualizer::render_frame() {
 
         out_z = z2 + cur_dist_;
         if (out_z > 0.1f) {
-            out_sx = cx + static_cast<int>(czoom * x3 / out_z);
-            out_sy = cy + static_cast<int>(czoom * y3 / out_z);
+            float z_inv = 1.0f / out_z;
+            out_sx = cx + static_cast<int>(czoom * x3 * z_inv);
+            out_sy = cy + static_cast<int>(czoom * y3 * z_inv);
             return true;
         }
         return false;
     };
 
-    auto draw_thick_point = [&](int sx, int sy, Color color) {
-        if (sx >= 0 && sx < sw - 1 && sy >= 0 && sy < sh - 1) {
-            c.DrawPoint(sx, sy, true, color);
-            c.DrawPoint(sx+1, sy, true, color);
-            c.DrawPoint(sx, sy+1, true, color);
-            c.DrawPoint(sx+1, sy+1, true, color);
+    auto z_plot_inline = [&](int x, int y, float sz, Color col) {
+        if (x < 0 || x >= sw || y < 0 || y >= sh) return;
+        int idx = y * sw + x;
+        if (sz < z_ptr[idx]) {
+            z_ptr[idx] = sz;
+            c.DrawPoint(x, y, true, col);
         }
     };
 
     float floor_val = data->min_z - data->cz;
     for (float g = -4.0f; g <= 4.0f; g += 1.0f) {
-        for (float t = -4.0f; t <= 4.0f; t += 0.1f) {
+        for (float t = -4.0f; t <= 4.0f; t += 0.2f) {
             int sx, sy; float sz;
-            if (project(t, g, floor_val, sx, sy, sz)) draw_thick_point(sx, sy, Color::GrayDark);
-            if (project(g, t, floor_val, sx, sy, sz)) draw_thick_point(sx, sy, Color::GrayDark);
+            if (project(t, g, floor_val, sx, sy, sz)) z_plot_inline(sx, sy, sz, Color::GrayDark);
+            if (project(g, t, floor_val, sx, sy, sz)) z_plot_inline(sx, sy, sz, Color::GrayDark);
         }
     }
 
@@ -124,26 +129,37 @@ Element Visualizer::render_frame() {
         for (const auto& p : data->points) {
             int sx, sy; float sz;
             if (project(p.x - data->cx, p.y - data->cy, p.z - data->cz, sx, sy, sz)) {
-                if (sx >= 0 && sx < sw - 1 && sy >= 0 && sy < sh - 1) {
-                    float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
-                    uint8_t r_col = 0, g_col = 0, b_col = 0;
-                    if (v < 0.25f) { r_col = 255; g_col = static_cast<uint8_t>(v * 1020); }
-                    else if (v < 0.5f) { r_col = static_cast<uint8_t>((0.5f - v) * 1020); g_col = 255; }
-                    else if (v < 0.75f) { g_col = 255; b_col = static_cast<uint8_t>((v - 0.5f) * 1020); }
-                    else { g_col = static_cast<uint8_t>((1.0f - v) * 1020); b_col = 255; }
-                    Color col = Color::RGB(r_col, g_col, b_col);
+                int r = 0;
+                float base_r = (2.0f / (sz + 0.1f)) * splat_multiplier_;
+                if (base_r > 2.0f) r = 2;      
+                else if (base_r > 0.8f) r = 1; 
+                else r = 0;                    
 
-                    auto z_plot = [&](int x, int y) {
-                        int idx = y * sw + x;
-                        if (sz < z_buffer[idx]) {
-                            z_buffer[idx] = sz;
-                            c.DrawPoint(x, y, true, col);
+                float v = std::clamp((p.x - data->min_x) * x_range_inv, 0.0f, 1.0f);
+                uint8_t r_col = 0, g_col = 0, b_col = 0;
+                if (v < 0.25f) { r_col = 255; g_col = static_cast<uint8_t>(v * 1020); }
+                else if (v < 0.5f) { r_col = static_cast<uint8_t>((0.5f - v) * 1020); g_col = 255; }
+                else if (v < 0.75f) { g_col = 255; b_col = static_cast<uint8_t>((v - 0.5f) * 1020); }
+                else { g_col = static_cast<uint8_t>((1.0f - v) * 1020); b_col = 255; }
+                Color col = Color::RGB(r_col, g_col, b_col);
+
+                if (r == 0) {
+                    z_plot_inline(sx, sy, sz, col);
+                } else {
+                    for (int dy = -r; dy <= r; ++dy) {
+                        int py = sy + dy;
+                        if (py < 0 || py >= sh) continue;
+                        int row_off = py * sw;
+                        for (int dx = -r; dx <= r; ++dx) {
+                            int px = sx + dx;
+                            if (px < 0 || px >= sw) continue;
+                            int idx = row_off + px;
+                            if (sz < z_ptr[idx]) {
+                                z_ptr[idx] = sz;
+                                c.DrawPoint(px, py, true, col);
+                            }
                         }
-                    };
-                    z_plot(sx, sy);
-                    z_plot(sx + 1, sy);
-                    z_plot(sx, sy + 1);
-                    z_plot(sx + 1, sy + 1);
+                    }
                 }
             }
         }
@@ -153,32 +169,33 @@ Element Visualizer::render_frame() {
         int sx, sy; float sz;
         if (project(data->min_x-data->cx, 0.0f, data->min_z - data->cz, sx, sy, sz)) {
             for (int i = -4; i <= 4; ++i) {
-                c.DrawPoint(sx + i, sy, true, Color::White);
-                c.DrawPoint(sx, sy + i, true, Color::White);
+                z_plot_inline(sx + i, sy, sz, Color::White);
+                z_plot_inline(sx, sy + i, sz, Color::White);
             }
         }
     }
 
-    return window(text(" 3D High-Density Visualizer ") | hcenter | bold,
-        vbox({
-            hbox({
-                text(" Frame: " + data->frame_id) | color(Color::Cyan),
-                filler(),
-                text(cm ? "[CAMERA]" : "[ROBOT]") | bold | color(Color::Magenta),
-                filler(),
-                text(node_->is_teleop_enabled() ? "[TELEOP: ON]" : "[TELEOP: OFF]") | bold | color(node_->is_teleop_enabled() ? Color::Green : Color::Red),
-                filler(),
-                text(" Pts: " + std::to_string(data->points.size())) | color(Color::Green)
-            }),
+    bool teleop = node_->is_teleop_enabled();
+    return vbox({
+        hbox({
+            text(" 3D VISUALIZER ") | bold | color(Color::Yellow),
             separator(),
-            canvas(std::move(c)) | hcenter | flex | border,
-            hbox({
-                text(" [WASD] Orbit | [ARROWS/PgUp/PgDn] Pan | [U-O/J-L/M-.] Teleop | [1-3] Presets ") | dim,
-                filler(),
-                text(quit_flag_ ? " EXITING... " : "") | bold | color(Color::Red)
-            })
+            text(" Frame: " + data->frame_id) | color(Color::Cyan),
+            filler(),
+            text(cm ? "[CAMERA]" : "[ROBOT]") | bold | color(Color::Magenta),
+            filler(),
+            text(teleop ? " [TELEOP:ON] " : " [TELEOP:OFF] ") | bold | color(teleop ? Color::Green : Color::Red),
+            filler(),
+            text(" Pts: " + std::to_string(data->points.size())) | color(Color::Green)
+        }),
+        separator(),
+        canvas(std::move(c)) | hcenter | flex | border,
+        hbox({
+            text(" [WASD] Orbit | [ARROWS] Pan | [U-O/J-L] Teleop | [[] Splat- | []] Splat+ ") | dim,
+            filler(),
+            text(quit_flag_ ? " EXITING... " : "") | bold | color(Color::Red)
         })
-    );
+    }) | border;
 }
 
 bool Visualizer::handle_event(Event event) {
@@ -218,7 +235,9 @@ bool Visualizer::handle_event(Event event) {
     if (event == Event::Character('2')) { tar_yaw_ = DEF_YAW; tar_pitch_ = 1.5f; tar_roll_ = DEF_ROLL; tar_dist_ = 8.0f; cam_x_ = 0.0f; cam_y_ = 0.0f; cam_z_ = 0.0f; return true; }
     if (event == Event::Character('3')) { tar_yaw_ = DEF_YAW - 1.5f; tar_pitch_ = 0.0f; tar_roll_ = DEF_ROLL; tar_dist_ = 8.0f; cam_x_ = 0.0f; cam_y_ = 0.0f; cam_z_ = 0.0f; return true; }
     
-    if (event == Event::Character('r')) { tar_yaw_ = DEF_YAW; tar_pitch_ = DEF_PITCH; tar_roll_ = DEF_ROLL; tar_dist_ = DEF_DIST; cam_x_ = 0.0f; cam_y_ = 0.0f; cam_z_ = 0.0f; return true; }
+    if (event == Event::Character('r')) { tar_yaw_ = DEF_YAW; tar_pitch_ = DEF_PITCH; tar_roll_ = DEF_ROLL; tar_dist_ = DEF_DIST; cam_x_ = 0.0f; cam_y_ = 0.0f; cam_z_ = 0.0f; splat_multiplier_ = 1.0f; return true; }
+    if (event == Event::Character('[')) { splat_multiplier_ = std::max(0.1f, splat_multiplier_ - 0.1f); return true; }
+    if (event == Event::Character(']')) { splat_multiplier_ = std::min(5.0f, splat_multiplier_ + 0.1f); return true; }
     if (event == Event::Character('+') || event == Event::Character('=')) { tar_dist_ = tar_dist_.load() - 0.5f; return true; }
     if (event == Event::Character('-') || event == Event::Character('_')) { tar_dist_ = tar_dist_.load() + 0.5f; return true; }
     return false;

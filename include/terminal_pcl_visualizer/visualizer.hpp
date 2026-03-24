@@ -46,6 +46,9 @@ private:
 
     float lin_vel_ = 0.5f;
     float ang_vel_ = 1.0f;
+    float splat_multiplier_ = 1.0f;
+
+    std::vector<float> z_buffer_;
 
     ftxui::Element render_frame();
     bool handle_event(ftxui::Event event);
