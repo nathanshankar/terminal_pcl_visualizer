@@ -263,7 +263,7 @@ bool Visualizer::handle_event(Event event) {
     if (event == Event::Character('w')) { tar_yaw_ = tar_yaw_.load() - 0.2f; return true; }
     if (event == Event::Character('s')) { tar_yaw_ = tar_yaw_.load() + 0.2f; return true; }
     if (event == Event::Character('p')) { tar_roll_ = tar_roll_.load() + 0.2f; return true; }
-    if (event == Event::Character('o')) { tar_roll_ = tar_roll_.load() - 0.2f; return true; }
+    if (event == Event::Character(';')) { tar_roll_ = tar_roll_.load() - 0.2f; return true; }
     if (event == Event::Character('c')) { cam_mode_ = !cam_mode_.load(); return true; }
     
     if (event == Event::Character('1')) { tar_yaw_ = DEF_YAW; tar_pitch_ = 0.0f; tar_roll_ = DEF_ROLL; tar_dist_ = 5.0f; cam_x_ = 0.0f; cam_y_ = 0.0f; cam_z_ = 0.0f; return true; }

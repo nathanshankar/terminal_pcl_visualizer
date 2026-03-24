@@ -54,13 +54,13 @@ ros2 run terminal_pcl_visualizer visualizer_node --ros-args -p enable_teleop:=tr
 | :--- | :--- |
 | **W / S** | Orbit Up / Down (Pitch) |
 | **A / D** | Orbit Left / Right (Yaw) |
-| **P / O** | Roll Clockwise / Counter-clockwise |
+| **P / ;** | Roll Clockwise / Counter-clockwise |
 | **+ / -** | Zoom In / Out |
 | **Arrows** | Pan Left/Right/Up/Down |
 | **PgUp/PgDn**| Move Forward / Backward |
 | **1 / 2 / 3**| Camera Presets |
 | **R** | Reset Camera & Splatting |
-| **C** | Toggle Camera Mode (Camera-centric vs. World-centric) |
+| **C** | Toggle Camera Mode |
 
 ### Robot Teleop (if enabled)
 | Key | Action |
