@@ -29,7 +29,7 @@ class TerminalPCLNode : public rclcpp::Node {
 public:
     TerminalPCLNode() : Node("terminal_pcl_visualizer") {
         this->declare_parameter("topic", "/points");
-        this->declare_parameter("max_points", 2500);
+        this->declare_parameter("max_points", 20000); 
 
         std::string topic = this->get_parameter("topic").as_string();
         sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -46,6 +46,8 @@ public:
         std::string frame_id;
         float cx = 0, cy = 0, cz = 0;
         float min_x = 0, max_x = 0;
+        float min_y = 0, max_y = 0;
+        float min_z = 0, max_z = 0;
     };
 
     std::shared_ptr<Data> get_data() {
@@ -75,12 +77,14 @@ private:
                 if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
                     next->points.push_back({x, y, z});
                     sx += x; sy += y; sz += z;
-                    
                     if (next->points.size() == 1) {
                         next->min_x = next->max_x = x;
+                        next->min_y = next->max_y = y;
+                        next->min_z = next->max_z = z;
                     } else {
-                        next->min_x = std::min(next->min_x, x);
-                        next->max_x = std::max(next->max_x, x);
+                        next->min_x = std::min(next->min_x, x); next->max_x = std::max(next->max_x, x);
+                        next->min_y = std::min(next->min_y, y); next->max_y = std::max(next->max_y, y);
+                        next->min_z = std::min(next->min_z, z); next->max_z = std::max(next->max_z, z);
                     }
                 }
                 for (size_t s = 0; s < step && it_x != it_x.end(); ++s) { ++it_x; ++it_y; ++it_z; }
@@ -120,96 +124,129 @@ int main(int argc, char** argv) {
     const float DEF_ROLL = 1.5f;
     const float DEF_DIST = 5.0f;
 
-    std::atomic<float> yaw{DEF_YAW};
-    std::atomic<float> pitch{DEF_PITCH};
-    std::atomic<float> roll{DEF_ROLL};
-    std::atomic<float> dist{DEF_DIST};
-    std::atomic<float> zoom{250.0f};
+    float cur_yaw = DEF_YAW;
+    float cur_pitch = DEF_PITCH;
+    float cur_roll = DEF_ROLL;
+    float cur_dist = DEF_DIST;
+
+    std::atomic<float> tar_yaw{DEF_YAW};
+    std::atomic<float> tar_pitch{DEF_PITCH};
+    std::atomic<float> tar_roll{DEF_ROLL};
+    std::atomic<float> tar_dist{DEF_DIST};
+    
+    std::atomic<float> zoom{350.0f};
     std::atomic<bool> cam_mode{true};
 
     std::thread ros_thread([&]() { rclcpp::spin(node); });
 
     auto renderer = Renderer([&]() {
         auto data = node->get_data();
-        auto canvas_obj = Canvas(200, 120);
-        int cx = 100, cy = 60;
+        const int sw = 220;
+        const int sh = 110;
+        auto c = Canvas(sw, sh);
+        int cx = sw / 2;
+        int cy = sh / 2;
 
-        float cyaw = yaw.load();
-        float cpitch = pitch.load();
-        float croll = roll.load();
-        float cdist = dist.load();
+        cur_yaw += (tar_yaw.load() - cur_yaw) * 0.2f;
+        cur_pitch += (tar_pitch.load() - cur_pitch) * 0.2f;
+        cur_roll += (tar_roll.load() - cur_roll) * 0.2f;
+        cur_dist += (tar_dist.load() - cur_dist) * 0.2f;
+
+        std::vector<float> z_buffer(sw * sh, 1000.0f);
+        float x_range = std::max(0.1f, data->max_x - data->min_x);
         float czoom = zoom.load();
         bool cm = cam_mode.load();
 
+        auto project = [&](float dx, float dy, float dz, int& out_sx, int& out_sy, float& out_z) {
+            float rx, ry, rz;
+            if (cm) { rx = dx; ry = dy; rz = dz; }
+            else { rx = -dy; ry = -dz; rz = dx; }
+
+            float x1 = rx * cos(cur_yaw) + rz * sin(cur_yaw);
+            float z1 = -rx * sin(cur_yaw) + rz * cos(cur_yaw);
+            float y2 = ry * cos(cur_pitch) - z1 * sin(cur_pitch);
+            float z2 = ry * sin(cur_pitch) + z1 * cos(cur_pitch);
+            float x3 = x1 * cos(cur_roll) - y2 * sin(cur_roll);
+            float y3 = x1 * sin(cur_roll) + y2 * cos(cur_roll);
+
+            out_z = z2 + cur_dist;
+            if (out_z > 0.1f) {
+                out_sx = cx + static_cast<int>(czoom * x3 / out_z);
+                out_sy = cy + static_cast<int>(czoom * y3 / out_z);
+                return true;
+            }
+            return false;
+        };
+
+        auto draw_thick_point = [&](int sx, int sy, Color color) {
+            if (sx >= 0 && sx < sw - 1 && sy >= 0 && sy < sh - 1) {
+                c.DrawPoint(sx, sy, true, color);
+                c.DrawPoint(sx+1, sy, true, color);
+                c.DrawPoint(sx, sy+1, true, color);
+                c.DrawPoint(sx+1, sy+1, true, color);
+            }
+        };
+
+        // 1. Draw Grid on XY Plane, centered on data, anchored at actual cloud ground
+        // Floor height: Use the minimum z value of the point cloud (data->min_z)
+        float floor_val = data->min_z - data->cz;
+
+        for (float g = -4.0f; g <= 4.0f; g += 1.0f) {
+            for (float t = -4.0f; t <= 4.0f; t += 0.1f) {
+            int sx, sy; float sz;
+            // Grid follows the cloud center, floor at min_z
+            if (project(t, g, floor_val, sx, sy, sz)) draw_thick_point(sx, sy, Color::GrayDark);
+            if (project(g, t, floor_val, sx, sy, sz)) draw_thick_point(sx, sy, Color::GrayDark);
+            }
+        }
+
+        // 2. Draw PointCloud
         if (!data->points.empty()) {
-            float x_range = data->max_x - data->min_x;
-            if (x_range <= 0) x_range = 1.0f;
-
             for (const auto& p : data->points) {
-                float dx = p.x - data->cx;
-                float dy = p.y - data->cy;
-                float dz = p.z - data->cz;
-
-                float rx, ry, rz;
-                if (cm) {
-                    rx = dx; ry = dy; rz = dz;
-                } else {
-                    rx = -dy; ry = -dz; rz = dx;
-                }
-
-                float x1 = rx * cos(cyaw) + rz * sin(cyaw);
-                float z1 = -rx * sin(cyaw) + rz * cos(cyaw);
-                float y2 = ry * cos(cpitch) - z1 * sin(cpitch);
-                float z2 = ry * sin(cpitch) + z1 * cos(cpitch);
-                float x3 = x1 * cos(croll) - y2 * sin(croll);
-                float y3 = x1 * sin(croll) + y2 * cos(croll);
-
-                float final_z = z2 + cdist;
-                if (final_z > 0.1f) {
-                    int sx = cx + static_cast<int>(czoom * x3 / final_z);
-                    int sy = cy + static_cast<int>(czoom * y3 / final_z);
-                    if (sx >= 0 && sx < 200 && sy >= 0 && sy < 120) {
-                        // RGB Heatmap based on X-axis: Red (min X) -> Yellow -> Green -> Cyan -> Blue (max X)
-                        float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
-                        uint8_t r = 0, g = 0, b = 0;
-                        if (v < 0.25f) { // Red to Yellow
-                            r = 255; g = static_cast<uint8_t>(v * 4.0f * 255); b = 0;
-                        } else if (v < 0.5f) { // Yellow to Green
-                            r = static_cast<uint8_t>((0.5f - v) * 4.0f * 255); g = 255; b = 0;
-                        } else if (v < 0.75f) { // Green to Cyan
-                            r = 0; g = 255; b = static_cast<uint8_t>((v - 0.5f) * 4.0f * 255);
-                        } else { // Cyan to Blue
-                            r = 0; g = static_cast<uint8_t>((1.0f - v) * 4.0f * 255); b = 255;
+                int sx, sy; float sz;
+                if (project(p.x - data->cx, p.y - data->cy, p.z - data->cz, sx, sy, sz)) {
+                    if (sx >= 1 && sx < sw - 1 && sy >= 1 && sy < sh - 1) {
+                        if (sz < z_buffer[sy * sw + sx]) {
+                            z_buffer[sy * sw + sx] = sz;
+                            float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
+                            uint8_t r_col = 0, g_col = 0, b_col = 0;
+                            if (v < 0.25f) { r_col = 255; g_col = static_cast<uint8_t>(v * 1020); }
+                            else if (v < 0.5f) { r_col = static_cast<uint8_t>((0.5f - v) * 1020); g_col = 255; }
+                            else if (v < 0.75f) { g_col = 255; b_col = static_cast<uint8_t>((v - 0.5f) * 1020); }
+                            else { g_col = static_cast<uint8_t>((1.0f - v) * 1020); b_col = 255; }
+                            draw_thick_point(sx, sy, Color::RGB(r_col, g_col, b_col));
                         }
-                        canvas_obj.DrawPoint(sx, sy, true, Color::RGB(r, g, b));
                     }
                 }
             }
         }
 
-        for(int i=-4; i<=4; ++i) {
-            canvas_obj.DrawPoint(cx + i, cy, true, Color::White);
-            canvas_obj.DrawPoint(cx, cy + i, true, Color::White);
+        // Crosshair at the center of the point cloud, projected onto the floor (min_z)
+        if (!data->points.empty()) {
+            int sx, sy;
+            float sz;
+            // Project the center (cx, cy, min_z - cz) to screen coordinates
+            if (project(data->min_x-data->cx, 0.0f, data->min_z - data->cz, sx, sy, sz)) {
+            for (int i = -4; i <= 4; ++i) {
+                c.DrawPoint(sx + i, sy, true, Color::White);
+                c.DrawPoint(sx, sy + i, true, Color::White);
+            }
+            }
         }
 
-        std::stringstream ss;
-        ss << "Y:" << std::fixed << std::setprecision(1) << cyaw << " P:" << cpitch << " R:" << croll;
-
-        return window(text(" 3D PointCloud Visualizer ") | hcenter | bold,
+        return window(text(" 3D High-Density Visualizer ") | hcenter | bold,
             vbox({
                 hbox({
                     text(" Frame: " + data->frame_id) | color(Color::Cyan),
-                    filler(),
-                    text(ss.str()) | color(Color::GrayLight),
                     filler(),
                     text(cm ? "[CAMERA]" : "[ROBOT]") | bold | color(Color::Magenta),
                     filler(),
                     text(" Pts: " + std::to_string(data->points.size())) | color(Color::Green)
                 }),
                 separator(),
-                canvas(std::move(canvas_obj)) | hcenter | border,
+                canvas(std::move(c)) | hcenter | size(HEIGHT, EQUAL, 30) | border,
                 hbox({
-                    text(" [WASD] Orbit | [OP] Roll | [1/2/3] Views | [Q] Quit ") | dim,
+                    text(" [WASD] Orbit | [OP] Roll | [1/2/3] Presets | [Q] Quit ") | dim,
                     filler(),
                     text(g_quit_flag ? " EXITING... " : "") | bold | color(Color::Red)
                 })
@@ -219,28 +256,28 @@ int main(int argc, char** argv) {
 
     auto component = CatchEvent(renderer, [&](Event event) {
         if (event == Event::Character('q') || event == Event::Escape) { g_quit_flag = true; screen.Exit(); return true; }
-        if (event == Event::Character('w')) { pitch = pitch.load() - 0.1f; return true; }
-        if (event == Event::Character('s')) { pitch = pitch.load() + 0.1f; return true; }
-        if (event == Event::Character('a')) { yaw = yaw.load() - 0.1f; return true; }
-        if (event == Event::Character('d')) { yaw = yaw.load() + 0.1f; return true; }
-        if (event == Event::Character('p')) { roll = roll.load() + 0.1f; return true; }
-        if (event == Event::Character('o')) { roll = roll.load() - 0.1f; return true; }
+        if (event == Event::Character('a')) { tar_pitch = tar_pitch.load() - 0.2f; return true; }
+        if (event == Event::Character('d')) { tar_pitch = tar_pitch.load() + 0.2f; return true; }
+        if (event == Event::Character('w')) { tar_yaw = tar_yaw.load() - 0.2f; return true; }
+        if (event == Event::Character('s')) { tar_yaw = tar_yaw.load() + 0.2f; return true; }
+        if (event == Event::Character('p')) { tar_roll = tar_roll.load() + 0.2f; return true; }
+        if (event == Event::Character('o')) { tar_roll = tar_roll.load() - 0.2f; return true; }
         if (event == Event::Character('c')) { cam_mode = !cam_mode.load(); return true; }
         
-        if (event == Event::Character('1')) { yaw = DEF_YAW; pitch = 0.0f; roll = DEF_ROLL; dist = DEF_DIST; return true; }
-        if (event == Event::Character('2')) { yaw = DEF_YAW; pitch = 1.5f; roll = DEF_ROLL; dist = 8.0f; return true; }
-        if (event == Event::Character('3')) { yaw = DEF_YAW + 1.5f; pitch = 0.0f; roll = DEF_ROLL; dist = 8.0f; return true; }
+        if (event == Event::Character('1')) { tar_yaw = DEF_YAW; tar_pitch = 0.0f; tar_roll = DEF_ROLL; tar_dist = 5.0f; return true; }
+        if (event == Event::Character('2')) { tar_yaw = DEF_YAW; tar_pitch = 1.5f; tar_roll = DEF_ROLL; tar_dist = 8.0f; return true; }
+        if (event == Event::Character('3')) { tar_yaw = DEF_YAW - 1.5f; tar_pitch = 0.0f; tar_roll = DEF_ROLL; tar_dist = 8.0f; return true; }
         
-        if (event == Event::Character('r')) { yaw = DEF_YAW; pitch = DEF_PITCH; roll = DEF_ROLL; dist = DEF_DIST; return true; }
-        if (event == Event::Character('+') || event == Event::Character('=')) { dist = dist.load() - 0.5f; return true; }
-        if (event == Event::Character('-') || event == Event::Character('_')) { dist = dist.load() + 0.5f; return true; }
+        if (event == Event::Character('r')) { tar_yaw = DEF_YAW; tar_pitch = DEF_PITCH; tar_roll = DEF_ROLL; tar_dist = DEF_DIST; return true; }
+        if (event == Event::Character('+') || event == Event::Character('=')) { tar_dist = tar_dist.load() - 0.5f; return true; }
+        if (event == Event::Character('-') || event == Event::Character('_')) { tar_dist = tar_dist.load() + 0.5f; return true; }
         return false;
     });
 
     std::thread ui_thread([&]() {
         while (!g_quit_flag && rclcpp::ok()) {
             screen.PostEvent(Event::Custom);
-            std::this_thread::sleep_for(50ms);
+            std::this_thread::sleep_for(30ms);
         }
         screen.Exit();
     });
