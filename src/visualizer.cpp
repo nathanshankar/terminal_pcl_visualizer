@@ -124,17 +124,26 @@ Element Visualizer::render_frame() {
         for (const auto& p : data->points) {
             int sx, sy; float sz;
             if (project(p.x - data->cx, p.y - data->cy, p.z - data->cz, sx, sy, sz)) {
-                if (sx >= 1 && sx < sw - 1 && sy >= 1 && sy < sh - 1) {
-                    if (sz < z_buffer[sy * sw + sx]) {
-                        z_buffer[sy * sw + sx] = sz;
-                        float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
-                        uint8_t r_col = 0, g_col = 0, b_col = 0;
-                        if (v < 0.25f) { r_col = 255; g_col = static_cast<uint8_t>(v * 1020); }
-                        else if (v < 0.5f) { r_col = static_cast<uint8_t>((0.5f - v) * 1020); g_col = 255; }
-                        else if (v < 0.75f) { g_col = 255; b_col = static_cast<uint8_t>((v - 0.5f) * 1020); }
-                        else { g_col = static_cast<uint8_t>((1.0f - v) * 1020); b_col = 255; }
-                        draw_thick_point(sx, sy, Color::RGB(r_col, g_col, b_col));
-                    }
+                if (sx >= 0 && sx < sw - 1 && sy >= 0 && sy < sh - 1) {
+                    float v = std::clamp((p.x - data->min_x) / x_range, 0.0f, 1.0f);
+                    uint8_t r_col = 0, g_col = 0, b_col = 0;
+                    if (v < 0.25f) { r_col = 255; g_col = static_cast<uint8_t>(v * 1020); }
+                    else if (v < 0.5f) { r_col = static_cast<uint8_t>((0.5f - v) * 1020); g_col = 255; }
+                    else if (v < 0.75f) { g_col = 255; b_col = static_cast<uint8_t>((v - 0.5f) * 1020); }
+                    else { g_col = static_cast<uint8_t>((1.0f - v) * 1020); b_col = 255; }
+                    Color col = Color::RGB(r_col, g_col, b_col);
+
+                    auto z_plot = [&](int x, int y) {
+                        int idx = y * sw + x;
+                        if (sz < z_buffer[idx]) {
+                            z_buffer[idx] = sz;
+                            c.DrawPoint(x, y, true, col);
+                        }
+                    };
+                    z_plot(sx, sy);
+                    z_plot(sx + 1, sy);
+                    z_plot(sx, sy + 1);
+                    z_plot(sx + 1, sy + 1);
                 }
             }
         }
