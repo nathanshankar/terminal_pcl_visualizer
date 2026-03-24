@@ -58,7 +58,7 @@ ros2 run terminal_pcl_visualizer visualizer_node --ros-args -p enable_teleop:=tr
 | **+ / -** | Zoom In / Out |
 | **Arrows** | Pan Left/Right/Up/Down |
 | **PgUp/PgDn**| Move Forward / Backward |
-| **1 / 2 / 3**| Camera Presets |
+| **1 / 2 / 3**| Camera Presets (front / side / top) |
 | **R** | Reset Camera & Splatting |
 | **C** | Toggle Camera Mode |
 
